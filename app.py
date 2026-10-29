@@ -9,6 +9,11 @@ app = Flask(__name__)
 mongo_client = MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
 db = mongo_client["ticketflash"]
 
+# Criando índices (Req 3)
+db.usuarios.create_index("email", unique=True)
+db.eventos.create_index([("categoria", 1), ("data", 1)])
+db.pedidos.create_index("usuarioId")
+
 redis_client = redis.Redis(
     host=os.environ.get("REDIS_HOST", "localhost"),
     port=6379,
