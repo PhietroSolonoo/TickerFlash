@@ -3,6 +3,7 @@ from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from bson import ObjectId
 import redis
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -20,7 +21,6 @@ redis_client = redis.Redis(
     decode_responses=True,
 )
 
-# Helper para validar e converter o ID do MongoDB
 def converter_id(id_str):
     try:
         return ObjectId(id_str)
@@ -42,83 +42,117 @@ def health():
 
 
 # --- CRUD DE EVENTOS (Req 2) ---
-
 @app.route("/eventos", methods=["POST"])
 def criar_evento():
     dados = request.get_json()
     if not dados:
         return jsonify({"erro": "JSON inválido"}), 400
-    
-    # Garante que os setores novos começam com 0 vendidos
     if "setores" in dados:
         for setor in dados["setores"]:
             setor["vendidos"] = 0
-
     resultado = db.eventos.insert_one(dados)
     dados["_id"] = str(resultado.inserted_id)
     return jsonify(dados), 201
-
 
 @app.route("/eventos", methods=["GET"])
 def listar_eventos():
     categoria = request.args.get("categoria")
     cidade = request.args.get("cidade")
-    
     query = {}
     if categoria:
         query["categoria"] = categoria
     if cidade:
-        query["local.cidade"] = cidade  # Filtra pelo subdocumento
-
+        query["local.cidade"] = cidade
     eventos = list(db.eventos.find(query))
     for ev in eventos:
         ev["_id"] = str(ev["_id"])
-    
     return jsonify(eventos), 200
-
 
 @app.route("/eventos/<id>", methods=["GET"])
 def buscar_evento(id):
     obj_id = converter_id(id)
     if not obj_id:
         return jsonify({"erro": "ID inválido"}), 404
-        
     evento = db.eventos.find_one({"_id": obj_id})
     if not evento:
         return jsonify({"erro": "Evento não encontrado"}), 404
-        
     evento["_id"] = str(evento["_id"])
     return jsonify(evento), 200
-
 
 @app.route("/eventos/<id>", methods=["PUT"])
 def atualizar_evento(id):
     obj_id = converter_id(id)
     if not obj_id:
         return jsonify({"erro": "ID inválido"}), 404
-
     dados = request.get_json()
     if not dados:
         return jsonify({"erro": "JSON inválido"}), 400
-
     resultado = db.eventos.update_one({"_id": obj_id}, {"$set": dados})
     if resultado.matched_count == 0:
         return jsonify({"erro": "Evento não encontrado"}), 404
-
     return jsonify({"mensagem": "Evento atualizado"}), 200
-
 
 @app.route("/eventos/<id>", methods=["DELETE"])
 def deletar_evento(id):
     obj_id = converter_id(id)
     if not obj_id:
         return jsonify({"erro": "ID inválido"}), 404
-
     resultado = db.eventos.delete_one({"_id": obj_id})
     if resultado.deleted_count == 0:
         return jsonify({"erro": "Evento não encontrado"}), 404
-
     return jsonify({"mensagem": "Evento removido"}), 200
+
+
+# --- AGREGAÇÕES (Req 4) ---
+@app.route("/relatorios/faturamento", methods=["GET"])
+def relatorio_faturamento():
+    pipeline = [
+        {"$match": {"status": "confirmado"}},
+        {"$group": {"_id": "$eventoId", "faturamentoTotal": {"$sum": "$valorTotal"}}},
+        {"$lookup": {
+            "from": "eventos",
+            "localField": "_id",
+            "foreignField": "_id",
+            "as": "evento"
+        }},
+        {"$unwind": "$evento"},
+        {"$project": {
+            "_id": 0,
+            "eventoId": {"$toString": "$_id"},
+            "nomeEvento": "$evento.nome",
+            "faturamentoTotal": 1
+        }},
+        {"$sort": {"faturamentoTotal": -1}}
+    ]
+    resultado = list(db.pedidos.aggregate(pipeline))
+    return jsonify(resultado), 200
+
+@app.route("/relatorios/ocupacao/<id>", methods=["GET"])
+def relatorio_ocupacao(id):
+    obj_id = converter_id(id)
+    if not obj_id:
+        return jsonify({"erro": "ID inválido"}), 404
+    pipeline = [
+        {"$match": {"_id": obj_id}},
+        {"$unwind": "$setores"},
+        {"$project": {
+            "_id": 0,
+            "evento": "$nome",
+            "setor": "$setores.nome",
+            "capacidade": "$setores.capacidade",
+            "vendidos": "$setores.vendidos",
+            "percentualOcupacao": {
+                "$multiply": [
+                    {"$divide": ["$setores.vendidos", "$setores.capacidade"]},
+                    100
+                ]
+            }
+        }}
+    ]
+    resultado = list(db.eventos.aggregate(pipeline))
+    if not resultado:
+        return jsonify({"erro": "Evento não encontrado ou sem setores"}), 404
+    return jsonify(resultado), 200
 
 
 if __name__ == "__main__":
